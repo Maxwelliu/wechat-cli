@@ -5,16 +5,31 @@ import sys
 
 
 def output_json(data, file=None):
-    file = file or sys.stdout
-    json.dump(data, file, ensure_ascii=False, indent=2)
-    file.write('\n')
+    target = file or sys.stdout
+    try:
+        json.dump(data, target, ensure_ascii=False, indent=2)
+        target.write('\n')
+    except UnicodeEncodeError:
+        content = json.dumps(data, ensure_ascii=False, indent=2) + '\n'
+        if hasattr(target, 'buffer'):
+            target.buffer.write(content.encode('utf-8', errors='replace'))
+        else:
+            target.write(content.encode(getattr(target, 'encoding', 'utf-8') or 'utf-8', errors='replace').decode(getattr(target, 'encoding', 'utf-8') or 'utf-8'))
 
 
 def output_text(text, file=None):
-    file = file or sys.stdout
-    file.write(text)
-    if not text.endswith('\n'):
-        file.write('\n')
+    target = file or sys.stdout
+    try:
+        target.write(text)
+        if not text.endswith('\n'):
+            target.write('\n')
+    except UnicodeEncodeError:
+        if not text.endswith('\n'):
+            text = text + '\n'
+        if hasattr(target, 'buffer'):
+            target.buffer.write(text.encode('utf-8', errors='replace'))
+        else:
+            target.write(text.encode(getattr(target, 'encoding', 'utf-8') or 'utf-8', errors='replace').decode(getattr(target, 'encoding', 'utf-8') or 'utf-8'))
 
 
 def output(data, fmt='json', file=None):

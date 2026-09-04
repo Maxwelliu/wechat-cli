@@ -2,6 +2,15 @@
 
 import sys
 
+if sys.platform == "win32":
+    try:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 import click
 
 from .core.context import AppContext
@@ -28,9 +37,11 @@ def cli(ctx, config_path):
       wechat-cli search "你好" --limit 50           # 全局搜索
       wechat-cli contacts --query "李"              # 搜索联系人
       wechat-cli new-messages                       # 获取增量新消息
+      wechat-cli export-html "张三"               # 导出为 HTML 页面
     """
-    # init/version 命令不需要 AppContext
-    if ctx.invoked_subcommand in ("init", "version"):
+    # init/version/export-all-accounts 命令不需要 AppContext
+    # export-all-accounts 使用 load_account_config(wxid) 加载多账号配置
+    if ctx.invoked_subcommand in ("init", "version", "export-all-accounts"):
         return
 
     try:
@@ -55,6 +66,9 @@ from .commands.export import export
 from .commands.stats import stats
 from .commands.unread import unread
 from .commands.favorites import favorites
+from .commands.export_html import export_html
+from .commands.export_all_html import export_all_html
+from .commands.export_all_accounts import export_all_accounts
 
 cli.add_command(init)
 cli.add_command(sessions)
@@ -67,6 +81,9 @@ cli.add_command(export)
 cli.add_command(stats)
 cli.add_command(unread)
 cli.add_command(favorites)
+cli.add_command(export_html)
+cli.add_command(export_all_html)
+cli.add_command(export_all_accounts)
 
 
 if __name__ == "__main__":

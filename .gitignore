@@ -42,3 +42,8 @@ Thumbs.db
 # Temp files
 *.tmp
 *.bak
+
+# Distribution folder binaries and debug scripts
+wechat-cli-dist/*.exe
+wechat-cli-dist/*.py
+fix_folder.py

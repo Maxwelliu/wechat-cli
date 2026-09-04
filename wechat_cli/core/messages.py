@@ -168,7 +168,10 @@ def _format_app_message_text(content, local_type, is_group, chat_username, chat_
         ref_display_name = ''
         if ref is not None:
             ref_display_name = (ref.findtext('displayname') or '').strip()
-            ref_content = _collapse_text(ref.findtext('content') or '')
+            ref_content_raw = ref.findtext('content') or ''
+            # 清理 XML 标签（如 <msg>...</msg>）
+            ref_content = re.sub(r'<[^>]+>', '', ref_content_raw)
+            ref_content = _collapse_text(ref_content)
         if len(ref_content) > 160:
             ref_content = ref_content[:160] + "..."
         quote_text = title or "[引用消息]"
@@ -326,13 +329,11 @@ def _format_message_text(local_id, local_type, content, is_group, chat_username,
             pass
 
     if base_type == 3:
-        if media_path:
-            tag = f"[图片] {media_path}"
-            if not media_exists:
-                tag += " (文件不存在)"
-        else:
-            tag = f"[图片] (local_id={local_id})"
-        text = tag
+        text = "[图片]"  # 简化占位符
+    elif base_type == 43:
+        text = "[视频]"  # 简化占位符
+    elif base_type == 34:
+        text = "[语音]"  # 简化占位符
     elif base_type == 47:
         text = "[表情]"
     elif base_type == 50:
@@ -342,6 +343,24 @@ def _format_message_text(local_id, local_type, content, is_group, chat_username,
             text, local_type, is_group, chat_username, chat_display_name, names, display_name_fn,
             resolve_media=resolve_media, db_dir=db_dir, create_time_ts=create_time_ts
         ) or "[链接/文件]"
+    elif base_type == 10000:
+        # 系统消息，检查是否是撤回消息
+        if content and 'revokemsg' in content:
+            root = _parse_xml_root(content)
+            if root is not None:
+                revoke_content = root.findtext('.//content') or ''
+                if revoke_content:
+                    # 提取撤回内容，如 "某人" 撤回了一条消息
+                    text = f"[撤回] {revoke_content}"
+                    sender = ''  # 发送者清空，不归属自己或对方
+                    return sender, text
+        # 其他系统消息
+        type_label = format_msg_type(local_type)
+        text = f"[{type_label}] {text}" if text else f"[{type_label}]"
+    elif base_type == 10002:
+        # 撤回消息（另一种格式）
+        text = f"[撤回] {text}" if text else "[撤回]"
+        sender = ''  # 发送者清空
     elif base_type != 1:
         type_label = format_msg_type(local_type)
         text = f"[{type_label}] {text}" if text else f"[{type_label}]"
@@ -365,19 +384,29 @@ def _load_name2id_maps(conn):
 
 # ---- 发送者解析 ----
 
-def _resolve_sender_label(real_sender_id, sender_from_content, is_group, chat_username, chat_display_name, names, id_to_username, display_name_fn):
+def _resolve_sender_label(real_sender_id, sender_from_content, is_group, chat_username, chat_display_name, names, id_to_username, display_name_fn, self_username=''):
     sender_username = id_to_username.get(real_sender_id, '')
+    
+    # 获取自己的昵称
+    self_display_name = display_name_fn(self_username, names) if self_username else '我'
+    
     if is_group:
         if sender_username and sender_username != chat_username:
+            if sender_username == self_username:
+                return self_display_name  # 群聊中自己发的消息，显示自己的昵称
             return display_name_fn(sender_username, names)
         if sender_from_content:
             return display_name_fn(sender_from_content, names)
         return ''
+    # 私聊
     if sender_username == chat_username:
-        return chat_display_name
+        return chat_display_name  # 对方发的消息
+    if sender_username == self_username:
+        return self_display_name  # 自己发的消息，显示自己的昵称
     if sender_username:
-        return display_name_fn(sender_username, names)
-    return ''
+        return display_name_fn(sender_username, names)  # 其他人（不太可能）
+    # 私聊中发送者为空 = 自己发的消息
+    return self_display_name
 
 
 # ---- SQL 查询 ----
@@ -404,17 +433,18 @@ def _build_message_filters(start_ts=None, end_ts=None, keyword='', msg_type_filt
     return clauses, params
 
 
-def _query_messages(conn, table_name, start_ts=None, end_ts=None, keyword='', limit=20, offset=0, msg_type_filter=None):
+def _query_messages(conn, table_name, start_ts=None, end_ts=None, keyword='', limit=20, offset=0, msg_type_filter=None, order='DESC'):
     if not _is_safe_msg_table_name(table_name):
         raise ValueError(f'非法消息表名: {table_name}')
     clauses, params = _build_message_filters(start_ts, end_ts, keyword, msg_type_filter)
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ''
+    order_dir = 'ASC' if str(order).upper() == 'ASC' else 'DESC'
     sql = f"""
         SELECT local_id, local_type, create_time, real_sender_id, message_content,
                WCDB_CT_message_content
         FROM [{table_name}]
         {where_sql}
-        ORDER BY create_time DESC
+        ORDER BY create_time {order_dir}
     """
     if limit is None:
         return conn.execute(sql, params).fetchall()
@@ -494,16 +524,22 @@ def _iter_table_contexts(ctx):
             'query': ctx['query'], 'username': ctx['username'], 'display_name': ctx['display_name'],
             'db_path': table['db_path'], 'table_name': table['table_name'],
             'is_group': ctx['is_group'],
+            'self_username': ctx.get('self_username', ''),  # 添加这个字段
         }
 
 
 def _candidate_page_size(limit, offset):
+    if limit is None:
+        return 10_000_000 + offset  # 无限制时用大数值
     return limit + offset
 
 
 def _page_ranked_entries(entries, limit, offset):
     ordered = sorted(entries, key=lambda item: item[0], reverse=True)
-    paged = ordered[offset:offset + limit]
+    if limit is None:
+        paged = ordered[offset:]  # 无限制时切片到末尾
+    else:
+        paged = ordered[offset:offset + limit]
     paged.sort(key=lambda item: item[0])
     return paged
 
@@ -521,7 +557,8 @@ def _build_history_line(row, ctx, names, id_to_username, display_name_fn, resolv
         db_dir=db_dir, create_time_ts=create_time, resolve_media=resolve_media,
     )
     sender_label = _resolve_sender_label(
-        real_sender_id, sender, ctx['is_group'], ctx['username'], ctx['display_name'], names, id_to_username, display_name_fn
+        real_sender_id, sender, ctx['is_group'], ctx['username'], ctx['display_name'], names, id_to_username, display_name_fn,
+        self_username=ctx.get('self_username', '')
     )
     if sender_label:
         return create_time, f'[{time_str}] {sender_label}: {text}'
@@ -540,7 +577,8 @@ def _build_search_entry(row, ctx, names, id_to_username, display_name_fn, resolv
     if text and len(text) > 300:
         text = text[:300] + '...'
     sender_label = _resolve_sender_label(
-        real_sender_id, sender, ctx['is_group'], ctx['username'], ctx['display_name'], names, id_to_username, display_name_fn
+        real_sender_id, sender, ctx['is_group'], ctx['username'], ctx['display_name'], names, id_to_username, display_name_fn,
+        self_username=ctx.get('self_username', '')
     )
     time_str = datetime.fromtimestamp(create_time).strftime('%Y-%m-%d %H:%M')
     entry = f"[{time_str}] [{ctx['display_name']}]"
